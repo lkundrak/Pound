@@ -1133,6 +1133,18 @@ do_http(thr_arg *arg)
             BIO_puts(be, "\r\n");
         }
 
+        /* flush to the back-end */
+        if(cur_backend->be_type == 0 && BIO_flush(be) != 1) {
+            str_be(buf, MAXBUF - 1, cur_backend);
+            end_req = cur_time();
+            addr2str(caddr, MAXBUF - 1, &from_host, 1);
+            logmsg(LOG_NOTICE, "(%lx) e500 for %s error flush to %s/%s: %s (%.3f sec)",
+                pthread_self(), caddr, buf, request, strerror(errno), (end_req - start_req) / 1000000.0);
+            err_reply(cl, h500, lstn->err500);
+            clean_all();
+            return;
+        }
+
         if(cl_11 && chunked) {
             /* had Transfer-encoding: chunked so read/write all the chunks (HTTP/1.1 only) */
             if(copy_chunks(cl, be, NULL, cur_backend->be_type, lstn->max_req)) {
