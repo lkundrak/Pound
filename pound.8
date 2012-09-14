@@ -519,6 +519,14 @@ renegotiation is supported.  If the value is 2, insecure renegotiation is suppor
 with unpatched clients. \fBThis can lead to a DoS and a Man in the Middle attack!\fR
 The default value is 0.
 .TP
+\fBSSLNoCompression\fR 0|1
+If this value is 1, the server will disable DEFLATE compression even if both server
+and client supports it.  In case compression is enabled an attacker with access to
+encrypted network traffic can conduct a "CRIME" attack by making client issue requests
+with specific character sequences and observing whether they got compressed or not,
+indicating their presence in part of the request that is not under his control (e.g.
+cookie headers). Default value is 0.
+.TP
 \fBCAlist\fR "CAcert_file"
 Set the list of "trusted" CA's for this server. The CAcert_file is a file containing
 a sequence of CA certificates (PEM format). The names of the defined CA certificates

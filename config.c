@@ -78,7 +78,7 @@ static regex_t  ListenHTTP, ListenHTTPS, End, Address, Port, Cert, xHTTP, Client
 static regex_t  Err414, Err500, Err501, Err503, MaxRequest, HeadRemove, RewriteLocation, RewriteDestination;
 static regex_t  Service, ServiceName, URL, HeadRequire, HeadDeny, BackEnd, Emergency, Priority, HAport, HAportAddr;
 static regex_t  Redirect, RedirectN, TimeOut, Session, Type, TTL, ID, DynScale;
-static regex_t  ClientCert, AddHeader, DisableSSLv2, SSLAllowClientRenegotiation, SSLHonorCipherOrder, Ciphers;
+static regex_t  ClientCert, AddHeader, DisableSSLv2, SSLAllowClientRenegotiation, SSLHonorCipherOrder, SSLNoCompression, Ciphers;
 static regex_t  CAlist, VerifyList, CRLlist, NoHTTPS11, Grace, Include, ConnTO, IgnoreCase, HTTPS, HTTPSCert;
 static regex_t  Disabled, Threads, CNName, Anonymise;
 
@@ -1123,6 +1123,14 @@ parse_HTTPS(void)
                 ssl_op_disable |= SSL_OP_CIPHER_SERVER_PREFERENCE;
                 ssl_op_enable &= ~SSL_OP_CIPHER_SERVER_PREFERENCE;
             }
+        } else if(!regexec(&SSLNoCompression, lin, 4, matches, 0)) {
+            if (atoi(lin + matches[1].rm_so)) {
+                ssl_op_enable |= SSL_OP_NO_COMPRESSION;
+                ssl_op_disable &= ~SSL_OP_NO_COMPRESSION;
+            } else {
+                ssl_op_disable |= SSL_OP_NO_COMPRESSION;
+                ssl_op_enable &= ~SSL_OP_NO_COMPRESSION;
+            }
         } else if(!regexec(&Ciphers, lin, 4, matches, 0)) {
             has_other = 1;
             if(res->ctx == NULL)
@@ -1409,6 +1417,7 @@ config_parse(const int argc, char **const argv)
     || regcomp(&SSLAllowClientRenegotiation, "^[ \t]*SSLAllowClientRenegotiation[ \t]+([012])[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&DisableSSLv2, "^[ \t]*DisableSSLv2[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&SSLHonorCipherOrder, "^[ \t]*SSLHonorCipherOrder[ \t]+([01])[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
+    || regcomp(&SSLNoCompression, "^[ \t]*SSLNoCompression[ \t]+([01])[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&Ciphers, "^[ \t]*Ciphers[ \t]+\"(.+)\"[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&CAlist, "^[ \t]*CAlist[ \t]+\"(.+)\"[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&VerifyList, "^[ \t]*VerifyList[ \t]+\"(.+)\"[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
@@ -1571,6 +1580,7 @@ config_parse(const int argc, char **const argv)
     regfree(&SSLAllowClientRenegotiation);
     regfree(&DisableSSLv2);
     regfree(&SSLHonorCipherOrder);
+    regfree(&SSLNoCompression);
     regfree(&Ciphers);
     regfree(&CAlist);
     regfree(&VerifyList);
