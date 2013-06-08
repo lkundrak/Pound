@@ -156,7 +156,7 @@ get_thr_arg(void)
     thr_arg *res;
 
     (void)pthread_mutex_lock(&arg_mut);
-    if(first == NULL)
+    while(first == NULL)
         (void)pthread_cond_wait(&arg_cond, &arg_mut);
     if((res = first) != NULL)
         if((first = first->next) == NULL)
