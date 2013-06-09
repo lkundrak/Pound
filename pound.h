@@ -272,7 +272,6 @@ extern int  numthreads,         /* number of worker threads */
             daemonize,          /* run as daemon */
             log_facility,       /* log facility to use */
             print_log,          /* print log messages to stdout/stderr */
-            grace,              /* grace period before shutdown */
             control_sock;       /* control socket */
 
 extern regex_t  HEADER,     /* Allowed header */
