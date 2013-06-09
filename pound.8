@@ -296,16 +296,6 @@ wait for a connection to the back-end (in seconds). Default: the
 .B TimeOut
 value. This value can be overridden for specific back-ends.
 .TP
-\fBGrace\fR value
-How long should
-.B Pound
-continue to answer existing connections after a receiving and INT or HUP
-signal (default: 30 seconds). The configured listeners are closed
-immediately. You can bypass this behaviour by stopping
-.B Pound
-with a TERM or QUIT signal, in which case the program exits without any
-delay.
-.TP
 \fBSSLEngine\fR "name"
 Use an OpenSSL hardware acceleration card called \fIname\fR. Available
 only if OpenSSL-engine is installed on your system.

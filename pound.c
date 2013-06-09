@@ -27,6 +27,9 @@
 
 #include    "pound.h"
 
+/* while in shutdown, check number of running threads every 10 seconds */
+#define     RUNNING_CHECK_PERIOD 10
+
 /* common variables */
 char        *user,              /* user to run as */
             *group,             /* group to run as */
@@ -39,7 +42,6 @@ int         alive_to,           /* check interval for resurrection */
             daemonize,          /* run as daemon */
             log_facility,       /* log facility to use */
             print_log,          /* print log messages to stdout/stderr */
-            grace,              /* grace period before shutdown */
             control_sock;       /* control socket */
 
 SERVICE     *services;          /* global services (if any) */
@@ -112,6 +114,7 @@ static thr_arg          *first = NULL, *last = NULL;
 static pthread_cond_t   arg_cond;
 static pthread_mutex_t  arg_mut;
 int                     numthreads;
+static int              waiting = 0;
 
 static void
 init_thr_arg(void)
@@ -156,8 +159,10 @@ get_thr_arg(void)
     thr_arg *res;
 
     (void)pthread_mutex_lock(&arg_mut);
+    waiting++;
     while(first == NULL)
         (void)pthread_cond_wait(&arg_cond, &arg_mut);
+    waiting--;
     if((res = first) != NULL)
         if((first = first->next) == NULL)
             last = NULL;
@@ -486,13 +491,33 @@ main(const int argc, char **argv)
             /* and start working */
             for(;;) {
                 if(shut_down) {
-                    logmsg(LOG_NOTICE, "shutting down...");
+                    int finished;
+
+                    logmsg(LOG_NOTICE, "shutting down (%d)...", getpid());
                     for(lstn = listeners; lstn; lstn = lstn->next)
                         close(lstn->sock);
-                    if(grace > 0) {
-                        sleep(grace);
-                        logmsg(LOG_NOTICE, "grace period expired - exiting...");
+                    /* rename control file (append pid) */
+                    if(ctrl_name != NULL) {
+                        char *ctrl_tmp = malloc(strlen(ctrl_name)+11);
+                        sprintf(ctrl_tmp, "%s.%d", ctrl_name, getpid());
+                        rename(ctrl_name, ctrl_tmp);
+                        free(ctrl_name);
+                        ctrl_name = ctrl_tmp;
                     }
+                    /* wait for all threads to be finished */
+                    finished = 0;
+                    while(!finished) {
+                        int running;
+                        (void)pthread_mutex_lock(&arg_mut);
+                        running = numthreads-waiting;
+                        finished = !first && !running;
+                        (void)pthread_mutex_unlock(&arg_mut);
+                        if(!finished) {
+                            logmsg(LOG_INFO, "%d thread(s) still running...", running);
+                            sleep(RUNNING_CHECK_PERIOD);
+                        }
+                    }
+                    logmsg(LOG_NOTICE, "no threads running - exiting...");
                     if(ctrl_name != NULL)
                         (void)unlink(ctrl_name);
                     exit(0);

@@ -79,7 +79,7 @@ static regex_t  Err414, Err500, Err501, Err503, MaxRequest, HeadRemove, RewriteL
 static regex_t  Service, ServiceName, URL, HeadRequire, HeadDeny, BackEnd, Emergency, Priority, HAport, HAportAddr;
 static regex_t  Redirect, RedirectN, TimeOut, Session, Type, TTL, ID, DynScale;
 static regex_t  ClientCert, AddHeader, DisableSSLv2, SSLAllowClientRenegotiation, SSLHonorCipherOrder, Ciphers;
-static regex_t  CAlist, VerifyList, CRLlist, NoHTTPS11, Grace, Include, ConnTO, IgnoreCase, HTTPS, HTTPSCert;
+static regex_t  CAlist, VerifyList, CRLlist, NoHTTPS11, Include, ConnTO, IgnoreCase, HTTPS, HTTPSCert;
 static regex_t  Disabled, Threads, CNName, Anonymise;
 
 static regmatch_t   matches[5];
@@ -1273,8 +1273,6 @@ parse_file(void)
                         def_facility = facilitynames[i].c_val;
                         break;
                     }
-        } else if(!regexec(&Grace, lin, 4, matches, 0)) {
-            grace = atoi(lin + matches[1].rm_so);
         } else if(!regexec(&LogLevel, lin, 4, matches, 0)) {
             log_level = atoi(lin + matches[1].rm_so);
         } else if(!regexec(&Client, lin, 4, matches, 0)) {
@@ -1373,7 +1371,6 @@ config_parse(const int argc, char **const argv)
     || regcomp(&Threads, "^[ \t]*Threads[ \t]+([1-9][0-9]*)[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&LogFacility, "^[ \t]*LogFacility[ \t]+([a-z0-9-]+)[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&LogLevel, "^[ \t]*LogLevel[ \t]+([0-5])[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
-    || regcomp(&Grace, "^[ \t]*Grace[ \t]+([0-9]+)[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&Alive, "^[ \t]*Alive[ \t]+([1-9][0-9]*)[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&SSLEngine, "^[ \t]*SSLEngine[ \t]+\"(.+)\"[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
     || regcomp(&Control, "^[ \t]*Control[ \t]+\"(.+)\"[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)
@@ -1509,7 +1506,6 @@ config_parse(const int argc, char **const argv)
     numthreads = 128;
     alive_to = 30;
     daemonize = 1;
-    grace = 30;
 
     services = NULL;
     listeners = NULL;
@@ -1535,7 +1531,6 @@ config_parse(const int argc, char **const argv)
     regfree(&Threads);
     regfree(&LogFacility);
     regfree(&LogLevel);
-    regfree(&Grace);
     regfree(&Alive);
     regfree(&SSLEngine);
     regfree(&Control);
