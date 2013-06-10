@@ -219,7 +219,6 @@ logmsg(const int priority, const char *fmt, ...)
 {
     char    buf[MAXBUF + 1];
     va_list ap;
-    struct tm   *t_now, t_res;
 
     buf[MAXBUF] = '\0';
     va_start(ap, fmt);
@@ -242,7 +241,6 @@ va_dcl
 {
     char    buf[MAXBUF + 1];
     va_list ap;
-    struct tm   *t_now, t_res;
 
     buf[MAXBUF] = '\0';
     va_start(ap);

@@ -225,7 +225,6 @@ parse_be(const int is_emergency)
     char        lin[MAXBUF];
     BACKEND     *res;
     int         has_addr, has_port;
-    struct hostent      *host;
     struct sockaddr_in  in;
     struct sockaddr_in6 in6;
 
@@ -904,7 +903,6 @@ parse_HTTPS(void)
     MATCHER             *m;
     int                 has_addr, has_port, has_other;
     long                ssl_op_enable, ssl_op_disable;
-    struct hostent      *host;
     struct sockaddr_in  in;
     struct sockaddr_in6 in6;
     POUND_CTX           *pc;
@@ -1009,7 +1007,7 @@ parse_HTTPS(void)
 #ifdef SSL_CTRL_SET_TLSEXT_SERVERNAME_CB
             /* we have support for SNI */
             FILE        *fcert;
-            char        server_name[MAXBUF], *cp;
+            char        server_name[MAXBUF];
             X509        *x509;
 
             if(has_other)
@@ -1201,8 +1199,6 @@ parse_HTTPS(void)
                 svc->next = parse_service(lin + matches[1].rm_so);
             }
         } else if(!regexec(&End, lin, 4, matches, 0)) {
-            X509_STORE  *store;
-
             if(!has_addr || !has_port || res->ctx == NULL)
                 conf_err("ListenHTTPS missing Address, Port or Certificate - aborted");
 #ifdef SSL_CTRL_SET_TLSEXT_SERVERNAME_CB
@@ -1366,7 +1362,6 @@ void
 config_parse(const int argc, char **const argv)
 {
     char    *conf_name;
-    FILE    *f_conf;
     int     c_opt, check_only;
 
     if(regcomp(&Empty, "^[ \t]*$", REG_ICASE | REG_NEWLINE | REG_EXTENDED)

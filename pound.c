@@ -233,7 +233,6 @@ main(const int argc, char **argv)
     LISTENER            *lstn;
     pthread_t           thr;
     pthread_attr_t      attr;
-    struct sched_param  sp;
     uid_t               user_id;
     gid_t               group_id;
     FILE                *fpid;

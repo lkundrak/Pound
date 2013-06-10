@@ -42,7 +42,7 @@ static void
 err_reply(BIO *const c, const char *head, const char *txt)
 {
     BIO_printf(c, err_response, head, strlen(txt), txt);
-    BIO_flush(c);
+    (void)BIO_flush(c);
     return;
 }
 
