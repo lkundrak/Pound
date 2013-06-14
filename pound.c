@@ -47,6 +47,9 @@ int         alive_to,           /* check interval for resurrection */
 SERVICE     *services;          /* global services (if any) */
 
 LISTENER    *listeners;         /* all available listeners */
+LISTENER    *prev_listeners;    /* saved listeners */
+
+PID         *children;          /* pid of workers */
 
 regex_t HEADER,             /* Allowed header */
         CHUNK_HEAD,         /* chunk header line */
@@ -193,34 +196,31 @@ get_thr_qlen(void)
 static RETSIGTYPE
 h_term(const int sig)
 {
-    logmsg(LOG_NOTICE, "received signal %d - exiting...", sig);
     if(son > 0)
-        kill(son, sig);
-    if(ctrl_name != NULL)
-        (void)unlink(ctrl_name);
+        signal_all(children, sig);
+    else
+        if(ctrl_name != NULL)
+            (void)unlink(ctrl_name);
     exit(0);
 }
 
 /*
- * handle SIGHUP/SIGINT - exit after grace period
+ * handle SIGHUP/SIGINT - shut down worker (and spawn new one, if possible)
  */
 static RETSIGTYPE
 h_shut(const int sig)
 {
-    int         status;
-    LISTENER    *lstn;
-
-    logmsg(LOG_NOTICE, "received signal %d - shutting down...", sig);
     if(son > 0) {
-        for(lstn = listeners; lstn; lstn = lstn->next)
-            close(lstn->sock);
         kill(son, sig);
-        (void)wait(&status);
-        if(ctrl_name != NULL)
-            (void)unlink(ctrl_name);
-        exit(0);
-    } else
-        shut_down = 1;
+        son = 0;
+    }
+    shut_down = 1;
+}
+
+static RETSIGTYPE
+h_child(const int sig)
+{
+    /* just wake-up from sigsuspend() */
 }
 
 /*
@@ -236,6 +236,7 @@ main(const int argc, char **argv)
     int                 n_listeners, i, clnt_length, clnt;
     struct pollfd       *polls;
     LISTENER            *lstn;
+    LISTENER            *prev_lstn;
     pthread_t           thr;
     pthread_attr_t      attr;
     uid_t               user_id;
@@ -246,11 +247,11 @@ main(const int argc, char **argv)
 #ifndef SOL_TCP
     struct protoent     *pe;
 #endif
+    int                 daemon;
 
-    print_log = 0;
+    polls = NULL;
+    daemon = 0;
     (void)umask(077);
-    control_sock = -1;
-    log_facility = -1;
     logmsg(LOG_NOTICE, "starting...");
 
     signal(SIGHUP, h_shut);
@@ -258,6 +259,7 @@ main(const int argc, char **argv)
     signal(SIGTERM, h_term);
     signal(SIGQUIT, h_term);
     signal(SIGPIPE, SIG_IGN);
+    signal(SIGCHLD, h_child);
 
     srandom(getpid());
 
@@ -309,274 +311,350 @@ main(const int argc, char **argv)
     SOL_TCP = pe->p_proto;
 #endif
 
-    /* read config */
-    config_parse(argc, argv);
-
-    if(log_facility != -1)
-        openlog("pound", LOG_CONS | LOG_NDELAY, LOG_DAEMON);
-    if(ctrl_name != NULL) {
-        struct sockaddr_un  ctrl;
-
-        memset(&ctrl, 0, sizeof(ctrl));
-        ctrl.sun_family = AF_UNIX;
-        strncpy(ctrl.sun_path, ctrl_name, sizeof(ctrl.sun_path) - 1);
-        (void)unlink(ctrl.sun_path);
-        if((control_sock = socket(PF_UNIX, SOCK_STREAM, 0)) < 0) {
-            logmsg(LOG_ERR, "Control \"%s\" create: %s", ctrl.sun_path, strerror(errno));
-            exit(1);
-        }
-        if(bind(control_sock, (struct sockaddr *)&ctrl, (socklen_t)sizeof(ctrl)) < 0) {
-            logmsg(LOG_ERR, "Control \"%s\" bind: %s", ctrl.sun_path, strerror(errno));
-            exit(1);
-        }
-        listen(control_sock, 512);
-    }
-
-    /* open listeners */
-    for(lstn = listeners, n_listeners = 0; lstn; lstn = lstn->next, n_listeners++) {
-        int opt;
-
-        /* prepare the socket */
-        if((lstn->sock = socket(lstn->addr.ai_family == AF_INET? PF_INET: PF_INET6, SOCK_STREAM, 0)) < 0) {
-            addr2str(tmp, MAXBUF - 1, &lstn->addr, 0);
-            logmsg(LOG_ERR, "HTTP socket %s create: %s - aborted", tmp, strerror(errno));
-            exit(1);
-        }
-        opt = 1;
-        setsockopt(lstn->sock, SOL_SOCKET, SO_REUSEADDR, (void *)&opt, sizeof(opt));
-        if(bind(lstn->sock, lstn->addr.ai_addr, (socklen_t)lstn->addr.ai_addrlen) < 0) {
-            addr2str(tmp, MAXBUF - 1, &lstn->addr, 0);
-            logmsg(LOG_ERR, "HTTP socket bind %s: %s - aborted", tmp, strerror(errno));
-            exit(1);
-        }
-        listen(lstn->sock, 512);
-    }
-
-    /* alloc the poll structures */
-    if((polls = (struct pollfd *)calloc(n_listeners, sizeof(struct pollfd))) == NULL) {
-        logmsg(LOG_ERR, "Out of memory for poll - aborted");
-        exit(1);
-    }
-    for(lstn = listeners, i = 0; lstn; lstn = lstn->next, i++)
-        polls[i].fd = lstn->sock;
-
-    /* set uid if necessary */
-    if(user) {
-        struct passwd   *pw;
-
-        if((pw = getpwnam(user)) == NULL) {
-            logmsg(LOG_ERR, "no such user %s - aborted", user);
-            exit(1);
-        }
-        user_id = pw->pw_uid;
-    }
-
-    /* set gid if necessary */
-    if(group) {
-        struct group    *gr;
-
-        if((gr = getgrnam(group)) == NULL) {
-            logmsg(LOG_ERR, "no such group %s - aborted", group);
-            exit(1);
-        }
-        group_id = gr->gr_gid;
-    }
-
-    /* Turn off verbose messages (if necessary) */
-    print_log = 0;
-
-    if(daemonize) {
-        /* daemonize - make ourselves a subprocess. */
-        switch (fork()) {
-            case 0:
-                if(log_facility != -1) {
-                    close(0);
-                    close(1);
-                    close(2);
-                }
-                break;
-            case -1:
-                logmsg(LOG_ERR, "fork: %s - aborted", strerror(errno));
-                exit(1);
-            default:
-                exit(0);
-        }
-#ifdef  HAVE_SETSID
-        (void) setsid();
-#endif
-    }
-
-    /* record pid in file */
-    if((fpid = fopen(pid_name, "wt")) != NULL) {
-        fprintf(fpid, "%d\n", getpid());
-        fclose(fpid);
-    } else
-        logmsg(LOG_NOTICE, "Create \"%s\": %s", pid_name, strerror(errno));
-
-    /* chroot if necessary */
-    if(root_jail) {
-        if(chroot(root_jail)) {
-            logmsg(LOG_ERR, "chroot: %s - aborted", strerror(errno));
-            exit(1);
-        }
-        if(chdir("/")) {
-            logmsg(LOG_ERR, "chroot/chdir: %s - aborted", strerror(errno));
-            exit(1);
-        }
-    }
-
-    if(group)
-        if(setgid(group_id) || setegid(group_id)) {
-            logmsg(LOG_ERR, "setgid: %s - aborted", strerror(errno));
-            exit(1);
-        }
-    if(user)
-        if(setuid(user_id) || seteuid(user_id)) {
-            logmsg(LOG_ERR, "setuid: %s - aborted", strerror(errno));
-            exit(1);
-        }
-
-    /* split off into monitor and working process if necessary */
     for(;;) {
-#ifdef  UPER
-        if((son = fork()) > 0) {
-            int status;
+        /* free previous values and re-initialize */
+        free(user);
+        free(group);
+        free(root_jail);
+        free(ctrl_name);
 
-            (void)wait(&status);
-            if(WIFEXITED(status))
-                logmsg(LOG_ERR, "MONITOR: worker exited normally %d, restarting...", WEXITSTATUS(status));
-            else if(WIFSIGNALED(status))
-                logmsg(LOG_ERR, "MONITOR: worker exited on signal %d, restarting...", WTERMSIG(status));
-            else
-                logmsg(LOG_ERR, "MONITOR: worker exited (stopped?) %d, restarting...", status);
-        } else if (son == 0) {
+        print_log = 0;
+        control_sock = -1;
+        log_facility = -1;
+
+        /* preserve listeners */
+        prev_listeners = listeners;
+        listeners = NULL;
+
+        /* read config */
+        config_parse(argc, argv);
+        if(shut_down)
+            print_log = 0;
+
+        if(log_facility != -1)
+            openlog("pound", LOG_CONS | LOG_NDELAY, LOG_DAEMON);
+        else
+            closelog();
+
+        if(ctrl_name != NULL) {
+            struct sockaddr_un  ctrl;
+
+            if(control_sock >= 0)
+                close(control_sock);
+
+            memset(&ctrl, 0, sizeof(ctrl));
+            ctrl.sun_family = AF_UNIX;
+            strncpy(ctrl.sun_path, ctrl_name, sizeof(ctrl.sun_path) - 1);
+            (void)unlink(ctrl.sun_path);
+            if((control_sock = socket(PF_UNIX, SOCK_STREAM, 0)) < 0) {
+                logmsg(LOG_ERR, "Control \"%s\" create: %s", ctrl.sun_path, strerror(errno));
+                exit(1);
+            }
+            if(bind(control_sock, (struct sockaddr *)&ctrl, (socklen_t)sizeof(ctrl)) < 0) {
+                logmsg(LOG_ERR, "Control \"%s\" bind: %s", ctrl.sun_path, strerror(errno));
+                exit(1);
+            }
+            listen(control_sock, 512);
+        }
+
+        /* open listeners */
+        for(lstn = listeners, n_listeners = 0; lstn; lstn = lstn->next, n_listeners++) {
+            int opt;
+
+            /* try to re-use listener socket */
+            for(prev_lstn = prev_listeners; prev_lstn; prev_lstn = prev_lstn->next) {
+                if(prev_lstn->sock >= 0 && !addrinfo_cmp(&prev_lstn->addr, &lstn->addr))
+                    break;
+            }
+            if(prev_lstn && prev_lstn->sock >= 0) {
+                char addr[MAXBUF];
+                /* reuse listener socket */
+                lstn->sock = prev_lstn->sock;
+                prev_lstn->sock = -1;
+                addr2str(addr, sizeof(addr), &prev_lstn->addr, 0);
+                logmsg(LOG_INFO, "reusing listener socket for %s", addr);
+            } else {
+                /* prepare the socket */
+                if((lstn->sock = socket(lstn->addr.ai_family == AF_INET? PF_INET: PF_INET6, SOCK_STREAM, 0)) < 0) {
+                    addr2str(tmp, MAXBUF - 1, &lstn->addr, 0);
+                    logmsg(LOG_ERR, "HTTP socket %s create: %s - aborted", tmp, strerror(errno));
+                    exit(1);
+                }
+                opt = 1;
+                setsockopt(lstn->sock, SOL_SOCKET, SO_REUSEADDR, (void *)&opt, sizeof(opt));
+                if(bind(lstn->sock, lstn->addr.ai_addr, (socklen_t)lstn->addr.ai_addrlen) < 0) {
+                    addr2str(tmp, MAXBUF - 1, &lstn->addr, 0);
+                    logmsg(LOG_ERR, "HTTP socket bind %s: %s - aborted", tmp, strerror(errno));
+                    exit(1);
+                }
+                listen(lstn->sock, 512);
+            }
+        }
+        /* close remaining old listeners and free structures */
+        while(prev_listeners) {
+            LISTENER *lstn = prev_listeners;
+            prev_listeners = prev_listeners->next;
+            if(lstn->sock >= 0)
+                close(lstn->sock);
+            free_listener(lstn);
+        }
+
+        /* alloc the poll structures */
+        free(polls);
+        if((polls = (struct pollfd *)calloc(n_listeners, sizeof(struct pollfd))) == NULL) {
+            logmsg(LOG_ERR, "Out of memory for poll - aborted");
+            exit(1);
+        }
+        for(lstn = listeners, i = 0; lstn; lstn = lstn->next, i++)
+            polls[i].fd = lstn->sock;
+
+        /* set uid if necessary */
+        if(user) {
+            struct passwd   *pw;
+
+            if((pw = getpwnam(user)) == NULL) {
+                logmsg(LOG_ERR, "no such user %s - aborted", user);
+                exit(1);
+            }
+            user_id = pw->pw_uid;
+        }
+
+        /* set gid if necessary */
+        if(group) {
+            struct group    *gr;
+
+            if((gr = getgrnam(group)) == NULL) {
+                logmsg(LOG_ERR, "no such group %s - aborted", group);
+                exit(1);
+            }
+            group_id = gr->gr_gid;
+        }
+
+        /* Turn off verbose messages (if necessary) */
+        print_log = 0;
+
+        if(!daemon && daemonize) {
+            /* daemonize - make ourselves a subprocess. */
+            switch (fork()) {
+                case 0:
+                    if(log_facility != -1) {
+                        close(0);
+                        close(1);
+                        close(2);
+                    }
+                    break;
+                case -1:
+                    logmsg(LOG_ERR, "fork: %s - aborted", strerror(errno));
+                    exit(1);
+                default:
+                    exit(0);
+            }
+            daemon = 1;
+#ifdef  HAVE_SETSID
+            (void) setsid();
 #endif
+        }
 
-            /* thread stuff */
-            pthread_attr_init(&attr);
-            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+        /* record pid in file */
+        if(!fpid) {
+            if((fpid = fopen(pid_name, "wt")) != NULL) {
+                fprintf(fpid, "%d\n", getpid());
+                fclose(fpid);
+            } else
+                logmsg(LOG_NOTICE, "Create \"%s\": %s", pid_name, strerror(errno));
+        }
+
+        shut_down = 0;
+
+        /* split off into monitor and working process if necessary */
+        while(!shut_down) {
+#ifdef  UPER
+            if((son = fork()) > 0) {
+                sigset_t mask, oldmask;
+
+                insert_pid(&children, son);
+
+                sigemptyset(&mask);
+                sigaddset(&mask, SIGHUP);
+                sigaddset(&mask, SIGINT);
+                sigaddset(&mask, SIGCHLD);
+
+                sigprocmask(SIG_BLOCK, &mask, &oldmask);
+                while(!shut_down) {
+                    int status, pid;
+
+                    while((pid = waitpid(-1, &status, WNOHANG)) > 0) {
+                        /* we only oversee youngest son, older ones are ignored */
+                        if(pid == son) {
+                            if(WIFEXITED(status))
+                                logmsg(LOG_ERR, "MONITOR: worker %d exited normally %d, restarting...", pid, WEXITSTATUS(status));
+                            else if(WIFSIGNALED(status))
+                                logmsg(LOG_ERR, "MONITOR: worker %d exited on signal %d, restarting...", pid, WTERMSIG(status));
+                            else
+                                logmsg(LOG_ERR, "MONITOR: worker %d exited (stopped?) %d, restarting...", pid, status);
+                        } else {
+                                logmsg(LOG_INFO, "worker %d exited", pid);
+                        }
+                        remove_pid(&children, pid);
+                    }
+
+                    /* wait for children or SIGHUP/INT */
+                    sigsuspend(&oldmask);
+                }
+                /* SIGHUP/INT: reload configuration */
+                sigprocmask(SIG_UNBLOCK, &mask, NULL);
+                logmsg(LOG_NOTICE, "config reload...");
+            } else if (son == 0) {
+#endif
+                /* chroot if necessary */
+                if(root_jail) {
+                    if(chroot(root_jail)) {
+                        logmsg(LOG_ERR, "chroot: %s - aborted", strerror(errno));
+                        exit(1);
+                    }
+                    if(chdir("/")) {
+                        logmsg(LOG_ERR, "chroot/chdir: %s - aborted", strerror(errno));
+                        exit(1);
+                    }
+                }
+
+                if(group)
+                    if(setgid(group_id) || setegid(group_id)) {
+                        logmsg(LOG_ERR, "setgid: %s - aborted", strerror(errno));
+                        exit(1);
+                    }
+                if(user)
+                    if(setuid(user_id) || seteuid(user_id)) {
+                        logmsg(LOG_ERR, "setuid: %s - aborted", strerror(errno));
+                        exit(1);
+                    }
+
+                /* thread stuff */
+                pthread_attr_init(&attr);
+                pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
 
 #ifdef  NEED_STACK
-            /* set new stack size - necessary for OpenBSD/FreeBSD and Linux NPTL */
-            if(pthread_attr_setstacksize(&attr, 1 << 18)) {
-                logmsg(LOG_ERR, "can't set stack size - aborted");
-                exit(1);
-            }
+                /* set new stack size - necessary for OpenBSD/FreeBSD and Linux NPTL */
+                if(pthread_attr_setstacksize(&attr, 1 << 18)) {
+                    logmsg(LOG_ERR, "can't set stack size - aborted");
+                    exit(1);
+                }
 #endif
-            /* start timer */
-            if(pthread_create(&thr, &attr, thr_timer, NULL)) {
-                logmsg(LOG_ERR, "create thr_resurect: %s - aborted", strerror(errno));
-                exit(1);
-            }
-
-            /* start the controlling thread (if needed) */
-            if(control_sock >= 0 && pthread_create(&thr, &attr, thr_control, NULL)) {
-                logmsg(LOG_ERR, "create thr_control: %s - aborted", strerror(errno));
-                exit(1);
-            }
-
-            /* pause to make sure the service threads were started */
-            sleep(1);
-
-            /* create the worker threads */
-            for(i = 0; i < numthreads; i++)
-                if(pthread_create(&thr, &attr, thr_http, NULL)) {
-                    logmsg(LOG_ERR, "create thr_http: %s - aborted", strerror(errno));
+                /* start timer */
+                if(pthread_create(&thr, &attr, thr_timer, NULL)) {
+                    logmsg(LOG_ERR, "create thr_resurect: %s - aborted", strerror(errno));
                     exit(1);
                 }
 
-            /* pause to make sure at least some of the worker threads were started */
-            sleep(1);
+                /* start the controlling thread (if needed) */
+                if(control_sock >= 0 && pthread_create(&thr, &attr, thr_control, NULL)) {
+                    logmsg(LOG_ERR, "create thr_control: %s - aborted", strerror(errno));
+                    exit(1);
+                }
 
-            /* and start working */
-            for(;;) {
-                if(shut_down) {
-                    int finished;
+                /* pause to make sure the service threads were started */
+                sleep(1);
 
-                    logmsg(LOG_NOTICE, "shutting down (%d)...", getpid());
-                    for(lstn = listeners; lstn; lstn = lstn->next)
-                        close(lstn->sock);
-                    /* rename control file (append pid) */
-                    if(ctrl_name != NULL) {
-                        char *ctrl_tmp = malloc(strlen(ctrl_name)+11);
-                        sprintf(ctrl_tmp, "%s.%d", ctrl_name, getpid());
-                        rename(ctrl_name, ctrl_tmp);
-                        free(ctrl_name);
-                        ctrl_name = ctrl_tmp;
+                /* create the worker threads */
+                for(i = 0; i < numthreads; i++)
+                    if(pthread_create(&thr, &attr, thr_http, NULL)) {
+                        logmsg(LOG_ERR, "create thr_http: %s - aborted", strerror(errno));
+                        exit(1);
                     }
-                    /* wait for all threads to be finished */
-                    finished = 0;
-                    while(!finished) {
-                        int running;
-                        (void)pthread_mutex_lock(&arg_mut);
-                        running = numthreads-waiting;
-                        finished = !first && !running;
-                        (void)pthread_mutex_unlock(&arg_mut);
-                        if(!finished) {
-                            logmsg(LOG_INFO, "%d thread(s) still running...", running);
-                            sleep(RUNNING_CHECK_PERIOD);
+
+                /* pause to make sure at least some of the worker threads were started */
+                sleep(1);
+
+                /* and start working */
+                for(;;) {
+                    if(shut_down) {
+                        int finished;
+
+                        logmsg(LOG_NOTICE, "shutting down (%d)...", getpid());
+                        for(lstn = listeners; lstn; lstn = lstn->next)
+                            close(lstn->sock);
+                        /* rename control file (append pid) */
+                        if(ctrl_name != NULL) {
+                            char *ctrl_tmp = malloc(strlen(ctrl_name)+11);
+                            sprintf(ctrl_tmp, "%s.%d", ctrl_name, getpid());
+                            rename(ctrl_name, ctrl_tmp);
+                            free(ctrl_name);
+                            ctrl_name = ctrl_tmp;
                         }
+                        /* wait for all threads to be finished */
+                        finished = 0;
+                        while(!finished) {
+                            int running;
+                            (void)pthread_mutex_lock(&arg_mut);
+                            running = numthreads-waiting;
+                            finished = !first && !running;
+                            (void)pthread_mutex_unlock(&arg_mut);
+                            if(!finished) {
+                                logmsg(LOG_INFO, "%d thread(s) still running...", running);
+                                sleep(RUNNING_CHECK_PERIOD);
+                            }
+                        }
+                        logmsg(LOG_NOTICE, "no threads running - exiting...");
+                        if(ctrl_name != NULL)
+                            (void)unlink(ctrl_name);
+                        exit(0);
                     }
-                    logmsg(LOG_NOTICE, "no threads running - exiting...");
-                    if(ctrl_name != NULL)
-                        (void)unlink(ctrl_name);
-                    exit(0);
-                }
-                for(lstn = listeners, i = 0; i < n_listeners; lstn = lstn->next, i++) {
-                    polls[i].events = POLLIN | POLLPRI;
-                    polls[i].revents = 0;
-                }
-                if(poll(polls, n_listeners, -1) < 0) {
-                    logmsg(LOG_WARNING, "poll: %s", strerror(errno));
-                } else {
-                    for(lstn = listeners, i = 0; lstn; lstn = lstn->next, i++) {
-                        if(polls[i].revents & (POLLIN | POLLPRI)) {
-                            memset(&clnt_addr, 0, sizeof(clnt_addr));
-                            clnt_length = sizeof(clnt_addr);
-                            if((clnt = accept(lstn->sock, (struct sockaddr *)&clnt_addr,
-                                (socklen_t *)&clnt_length)) < 0) {
-                                logmsg(LOG_WARNING, "HTTP accept: %s", strerror(errno));
-                            } else if(((struct sockaddr_in *)&clnt_addr)->sin_family == AF_INET
-                                   || ((struct sockaddr_in *)&clnt_addr)->sin_family == AF_INET6) {
-                                thr_arg arg;
+                    for(lstn = listeners, i = 0; i < n_listeners; lstn = lstn->next, i++) {
+                        polls[i].events = POLLIN | POLLPRI;
+                        polls[i].revents = 0;
+                    }
+                    if(poll(polls, n_listeners, -1) < 0) {
+                        logmsg(LOG_WARNING, "poll: %s", strerror(errno));
+                    } else {
+                        for(lstn = listeners, i = 0; lstn; lstn = lstn->next, i++) {
+                            if(polls[i].revents & (POLLIN | POLLPRI)) {
+                                memset(&clnt_addr, 0, sizeof(clnt_addr));
+                                clnt_length = sizeof(clnt_addr);
+                                if((clnt = accept(lstn->sock, (struct sockaddr *)&clnt_addr,
+                                    (socklen_t *)&clnt_length)) < 0) {
+                                    logmsg(LOG_WARNING, "HTTP accept: %s", strerror(errno));
+                                } else if(((struct sockaddr_in *)&clnt_addr)->sin_family == AF_INET
+                                       || ((struct sockaddr_in *)&clnt_addr)->sin_family == AF_INET6) {
+                                    thr_arg arg;
 
-                                if(lstn->disabled) {
-                                    /*
-                                    addr2str(tmp, MAXBUF - 1, &clnt_addr, 1);
-                                    logmsg(LOG_WARNING, "HTTP disabled listener from %s", tmp);
-                                    */
+                                    if(lstn->disabled) {
+                                        /*
+                                        addr2str(tmp, MAXBUF - 1, &clnt_addr, 1);
+                                        logmsg(LOG_WARNING, "HTTP disabled listener from %s", tmp);
+                                        */
+                                        close(clnt);
+                                    }
+                                    arg.sock = clnt;
+                                    arg.lstn = lstn;
+                                    if((arg.from_host.ai_addr = (struct sockaddr *)malloc(clnt_length)) == NULL) {
+                                        logmsg(LOG_WARNING, "HTTP arg address: malloc");
+                                        close(clnt);
+                                        continue;
+                                    }
+                                    memcpy(arg.from_host.ai_addr, &clnt_addr, clnt_length);
+                                    arg.from_host.ai_addrlen = clnt_length;
+                                    if(((struct sockaddr_in *)&clnt_addr)->sin_family == AF_INET)
+                                        arg.from_host.ai_family = AF_INET;
+                                    else
+                                        arg.from_host.ai_family = AF_INET6;
+                                    if(put_thr_arg(&arg))
+                                        close(clnt);
+                                } else {
+                                    /* may happen on FreeBSD, I am told */
+                                    logmsg(LOG_WARNING, "HTTP connection prematurely closed by peer");
                                     close(clnt);
                                 }
-                                arg.sock = clnt;
-                                arg.lstn = lstn;
-                                if((arg.from_host.ai_addr = (struct sockaddr *)malloc(clnt_length)) == NULL) {
-                                    logmsg(LOG_WARNING, "HTTP arg address: malloc");
-                                    close(clnt);
-                                    continue;
-                                }
-                                memcpy(arg.from_host.ai_addr, &clnt_addr, clnt_length);
-                                arg.from_host.ai_addrlen = clnt_length;
-                                if(((struct sockaddr_in *)&clnt_addr)->sin_family == AF_INET)
-                                    arg.from_host.ai_family = AF_INET;
-                                else
-                                    arg.from_host.ai_family = AF_INET6;
-                                if(put_thr_arg(&arg))
-                                    close(clnt);
-                            } else {
-                                /* may happen on FreeBSD, I am told */
-                                logmsg(LOG_WARNING, "HTTP connection prematurely closed by peer");
-                                close(clnt);
                             }
                         }
                     }
                 }
-            }
 #ifdef  UPER
-        } else {
-            /* failed to spawn son */
-            logmsg(LOG_ERR, "Can't fork worker (%s) - aborted", strerror(errno));
-            exit(1);
-        }
+            } else {
+                /* failed to spawn son */
+                logmsg(LOG_ERR, "Can't fork worker (%s) - aborted", strerror(errno));
+                exit(1);
+            }
 #endif
+        }
     }
 }

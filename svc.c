@@ -303,6 +303,18 @@ addr2str(char *const res, const int res_len, const struct addrinfo *addr, const 
 }
 
 /*
+ * Compare two addrinfo strctures, return 0 on match
+ */
+int
+addrinfo_cmp(const struct addrinfo *a, const struct addrinfo *b)
+{
+    return a->ai_flags == b->ai_flags && a->ai_family == b->ai_family
+        && a->ai_socktype == b->ai_socktype && a->ai_protocol == b->ai_protocol
+        && a->ai_addrlen == b->ai_addrlen && !memcmp(a->ai_addr, b->ai_addr, a->ai_addrlen)
+        ? 0 : 1;
+}
+
+/*
  * Parse a URL, possibly decoding hexadecimal-encoded characters
  */
 int
@@ -1829,5 +1841,132 @@ SSLINFO_callback(const SSL *ssl, int where, int rc)
     } else if(where & SSL_CB_HANDSHAKE_DONE && *reneg_state == RENEG_INIT) {
        // Reject any followup renegotiations
        *reneg_state = RENEG_REJECT;
+    }
+}
+
+/*
+ * free linked list of matchers
+ */
+void
+free_matchers(MATCHER *matchers)
+{
+    while (matchers) {
+        MATCHER *m = matchers;
+        matchers = matchers->next;
+        regfree(&m->pat);
+        free(m);
+    }
+}
+
+/*
+ * free linked list of backends
+ */
+void
+free_backends(BACKEND *backends) {
+    while (backends) {
+        BACKEND *be = backends;
+        backends = backends->next;
+        free(be->url);
+        SSL_CTX_free(be->ctx);
+        pthread_mutex_destroy(&be->mut);
+        free(be);
+    }
+}
+
+/*
+ * free linked list of services
+ */
+void
+free_services(SERVICE *services)
+{
+    while (services) {
+        SERVICE *svc = services;
+        services = services->next;
+        free_matchers(svc->url);
+        free_matchers(svc->req_head);
+        free_matchers(svc->deny_head);
+        free_backends(svc->backends);
+        free_backends(svc->emergency);
+        pthread_mutex_destroy(&svc->mut);
+        regfree(&svc->sess_start);
+        regfree(&svc->sess_pat);
+#if OPENSSL_VERSION_NUMBER >= 0x10000000L
+        LHM_lh_free(TABNODE, svc->sessions);
+#else
+        lh_free(svc->sessions);
+#endif
+        free(svc);
+    }
+}
+
+/*
+ * free linked list of pound contexts
+ */
+void
+free_contexts(POUND_CTX *contexts)
+{
+    while (contexts) {
+        POUND_CTX *ctx = contexts;
+        contexts = contexts->next;
+        free(ctx->server_name);
+        SSL_CTX_free(ctx->ctx);
+        free(ctx);
+    }
+}
+
+/*
+ * free listener structure (and all linked structures)
+ */
+void
+free_listener(LISTENER *lstn)
+{
+    free_contexts(lstn->ctx);
+    free(lstn->add_head);
+    regfree(&lstn->verb);
+    regfree(&lstn->url_pat);
+    free(lstn->err414);
+    free(lstn->err500);
+    free(lstn->err501);
+    free(lstn->err503);
+    free_matchers(lstn->head_off);
+    free_services(lstn->services);
+    free(lstn);
+}
+
+/*
+ * insert pid into list
+ */
+void insert_pid(PID **list, pid_t pid) {
+    PID *item = (PID*)malloc(sizeof(PID));
+    item->pid = pid;
+    item->next = *list;
+    *list = item;
+}
+
+/*
+ * remove pid from the list
+ */
+void remove_pid(PID **list, pid_t pid) {
+    PID *prev = NULL, *cur = *list;
+    while (cur) {
+        if (cur->pid == pid) {
+            if (prev)
+                prev->next = cur->next;
+            else
+                *list = cur->next;
+            free(cur);
+        }
+        prev = cur;
+        cur = cur->next;
+    }
+}
+
+/*
+ * signal all processes in the list
+ */
+void signal_all(PID *list, int signal) {
+    while (list) {
+        kill(list->pid, signal);
+        list = list->next;
     }
 }

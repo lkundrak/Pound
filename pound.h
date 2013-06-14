@@ -416,6 +416,12 @@ typedef struct _listener {
 extern LISTENER         *listeners; /* all available listeners */
 #endif /* NO_EXTERNALS */
 
+/* pid list item definition */
+typedef struct _pid {
+    pid_t               pid;
+    struct _pid         *next;
+}   PID;
+
 typedef struct _thr_arg {
     int             sock;
     LISTENER        *lstn;
@@ -507,6 +513,11 @@ extern int cpURL(char *, char *, int);
  * Translate inet/inet6 address into a string
  */
 extern void addr2str(char *, const int, const struct addrinfo *, const int);
+
+/*
+ * Compare two addrinfo strctures, return 0 on match
+ */
+extern int addrinfo_cmp(const struct addrinfo *a, const struct addrinfo *b);
 
 /*
  * Return a string representation for a back-end address
@@ -640,3 +651,23 @@ extern void *thr_timer(void *);
  * listens to client requests and calls the appropriate functions
  */
 extern void *thr_control(void *);
+
+/*
+ * free listener structure (and all linked structures)
+ */
+extern void free_listener(LISTENER *lstn);
+
+/*
+ * insert pid into list
+ */
+void insert_pid(PID **list, pid_t pid);
+
+/*
+ * remove pid from the list
+ */
+void remove_pid(PID **list, pid_t pid);
+
+/*
+ * signal all processes in the list
+ */
+void signal_all(PID *list, int signal);

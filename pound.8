@@ -912,6 +912,15 @@ server is re-opened as necessary.
 attempts to resolve the names of the hosts that appear in various requests and/or responses.
 That means it need a functioning resolver of some kind (be it /etc/hosts, DNS or something
 else).
+.PP
+When
+.B Pound
+is compiled to work in supervised mode (default), it supports configuration
+reload without service outage. When SIGHUP/SIGINT is delivered to the
+supervisor process, new worker child process is created while keeping old child
+for servicing current connections. Listening socket is then passed to the new
+child. SIGKILL/SIGQUIT terminates supervisor and all worker processes.
+
 .SH EXAMPLES
 To translate HTTPS requests to a local HTTP server (assuming your network address
 is 123.123.123.123):
