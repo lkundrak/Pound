@@ -734,10 +734,10 @@ parse_HTTP(void)
     memset(res, 0, sizeof(LISTENER));
     res->to = clnt_to;
     res->rewr_loc = 1;
-    res->err414 = "Request URI is too long";
-    res->err500 = "An internal server error occurred. Please try again later.";
-    res->err501 = "This method may not be used.";
-    res->err503 = "The service is not available. Please try again later.";
+    res->err414 = strdup("Request URI is too long");
+    res->err500 = strdup("An internal server error occurred. Please try again later.");
+    res->err501 = strdup("This method may not be used.");
+    res->err503 = strdup("The service is not available. Please try again later.");
     res->log_level = log_level;
     if(regcomp(&res->verb, xhttp[0], REG_ICASE | REG_NEWLINE | REG_EXTENDED))
         conf_err("xHTTP bad default pattern - aborted");
@@ -937,10 +937,10 @@ parse_HTTPS(void)
 
     res->to = clnt_to;
     res->rewr_loc = 1;
-    res->err414 = "Request URI is too long";
-    res->err500 = "An internal server error occurred. Please try again later.";
-    res->err501 = "This method may not be used.";
-    res->err503 = "The service is not available. Please try again later.";
+    res->err414 = strdup("Request URI is too long");
+    res->err500 = strdup("An internal server error occurred. Please try again later.");
+    res->err501 = strdup("This method may not be used.");
+    res->err503 = strdup("The service is not available. Please try again later.");
     res->allow_client_reneg = 0;
     res->log_level = log_level;
     if(regcomp(&res->verb, xhttp[0], REG_ICASE | REG_NEWLINE | REG_EXTENDED))
@@ -1464,6 +1464,7 @@ config_parse(const int argc, char **const argv)
         exit(1);
     }
 
+    optind = 1;
     opterr = 0;
     check_only = 0;
     conf_name = F_CONF;
