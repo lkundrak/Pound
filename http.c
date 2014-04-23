@@ -184,13 +184,19 @@ copy_chunks(BIO *const cl, BIO *const be, LONG *res_bytes, const int no_write, c
     regmatch_t  matches[2];
     int         res;
 
-    for(tot_size = 0L;;) {
+    for(tot_size = 0L, cont = -1L;;) {
+
         if((res = get_line(cl, buf, MAXBUF)) < 0) {
             logmsg(LOG_NOTICE, "(%lx) chunked read error: %s", pthread_self(), strerror(errno));
             return -1;
-        } else if(res > 0)
+        } else if(res > 0) {
             /* EOF */
+            if (cont != 0) {
+                logmsg(LOG_NOTICE, "(%lx) unexpected EOF: no terminating chunk", pthread_self());
+                return -1;
+            }
             return 0;
+        }
         if(!regexec(&CHUNK_HEAD, buf, 2, matches, 0))
             cont = STRTOL(buf, NULL, 16);
         else {
